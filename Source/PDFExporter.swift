@@ -3,7 +3,7 @@ import CoreText
 
 /// A4 export with embedded fonts, selectable text and automatic pagination.
 enum PDFExporter {
-    static func data(text: String, title: String) throws -> Data {
+    static func data(text: String, title: String, richText: NSAttributedString? = nil) throws -> Data {
         let buffer = NSMutableData()
         var mediaBox = CGRect(x: 0, y: 0, width: 595.28, height: 841.89)
         guard let consumer = CGDataConsumer(data: buffer),
@@ -18,12 +18,13 @@ enum PDFExporter {
             .foregroundColor: NSColor.black,
             .paragraphStyle: paragraph
         ])
-        let setter = CTFramesetterCreateWithAttributedString(attributed)
+        let content = (richText?.length ?? 0) > 0 ? richText! : attributed
+        let setter = CTFramesetterCreateWithAttributedString(content)
         let textBox = mediaBox.insetBy(dx: 48, dy: 54)
         let path = CGPath(rect: textBox, transform: nil)
         var offset = 0
         var page = 1
-        while offset < attributed.length {
+        while offset < content.length {
             let frame = CTFramesetterCreateFrame(setter, CFRange(location: offset, length: 0), path, nil)
             let visible = CTFrameGetVisibleStringRange(frame)
             guard visible.length > 0 else {

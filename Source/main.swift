@@ -1,13 +1,6 @@
 import AppKit
 import UniformTypeIdentifiers
 
-struct Note: Codable {
-    var id = UUID()
-    var text = ""
-    var modified = Date()
-    var title: String { text.split(separator: "\n").first.map(String.init) ?? "Новая заметка" }
-}
-
 final class FloatingPanel: NSPanel {
     override var canBecomeKey: Bool { true }
     override var canBecomeMain: Bool { true }
@@ -71,6 +64,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTa
     let status = NSTextField(labelWithString: "")
     var notes: [Note] = []
     var selectedID: UUID?
+    var displayedNotes: [Note] { NoteOrdering.displayed(notes) }
     var loading = false
     var dirty = false
     var storageUnavailable = false
@@ -140,7 +134,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTa
         editor?.appearance = appearance
         settingsWindow?.appearance = appearance
         textView.backgroundColor = .textBackgroundColor
-        textView.textColor = .textColor
+        // Do not overwrite foreground colors in rich pasted text.
         textView.insertionPointColor = .textColor
         table.backgroundColor = .controlBackgroundColor
         editor?.contentView?.needsDisplay = true
@@ -235,7 +229,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTa
         view.setAccessibilityRole(.button)
         view.onOpen = { [weak self] in
             guard let self else { return }
-            self.select(0)
+            if let preview = NoteOrdering.preview(self.notes), let index = self.notes.firstIndex(where: { $0.id == preview.id }) { self.select(index) }
             self.openEditor()
         }
         view.onMove = { [weak self] in self?.persistBubble() }
@@ -247,12 +241,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTa
 
     func updatePreview() {
         guard let view = bubble?.contentView as? Bubble else { return }
-        let latest = notes.first
+        let latest = NoteOrdering.preview(notes)
         view.previewTitle = String((latest?.title ?? "Новая заметка").prefix(200))
         let lines = (latest?.text ?? "").split(separator: "\n", omittingEmptySubsequences: true)
         let body = lines.dropFirst().joined(separator: " ")
         view.previewBody = String(body.prefix(300))
-        view.setAccessibilityLabel("Открыть последнюю заметку: \(view.previewTitle)")
+        view.setAccessibilityLabel("Открыть заметку: \(view.previewTitle)")
         view.needsDisplay = true
     }
 
@@ -316,7 +310,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTa
         textView.frame = NSRect(x: 0, y: 0, width: 520, height: 400)
         textView.minSize = NSSize(width: 0, height: 0)
         textView.maxSize = NSSize(width: CGFloat.greatestFiniteMagnitude, height: CGFloat.greatestFiniteMagnitude)
-        textView.isRichText = false
+        textView.isRichText = true
+        textView.importsGraphics = false
+        textView.usesAdaptiveColorMappingForDarkAppearance = true
         textView.allowsUndo = true
         textView.font = NSFont.systemFont(ofSize: 16)
         textView.textContainerInset = NSSize(width: 24, height: 24)
@@ -377,32 +373,80 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTa
 
     func numberOfRows(in tableView: NSTableView) -> Int { notes.count }
     func tableView(_ tableView: NSTableView, viewFor tableColumn: NSTableColumn?, row: Int) -> NSView? {
-        let label = NSTextField(labelWithString: notes[row].title)
+        let note = displayedNotes[row]
+        let cell = NSTableCellView()
+        let label = NSTextField(labelWithString: note.title)
         label.font = .systemFont(ofSize: 13, weight: .medium)
+        label.alignment = .left
         label.lineBreakMode = .byTruncatingTail
-        label.maximumNumberOfLines = 2
-        return label
+        label.maximumNumberOfLines = 1
+        label.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        let pin = NotePinButton()
+        pin.noteID = note.id
+        pin.image = NSImage(systemSymbolName: note.isPinned == true ? "pin.fill" : "pin", accessibilityDescription: nil)
+        pin.isBordered = false
+        pin.contentTintColor = note.isPinned == true ? .controlAccentColor : .secondaryLabelColor
+        pin.toolTip = note.isPinned == true ? "Открепить от превью" : "Закрепить для превью кнопки"
+        pin.setAccessibilityLabel(pin.toolTip!)
+        pin.target = self
+        pin.action = #selector(togglePin(_:))
+        for view in [label, pin] { view.translatesAutoresizingMaskIntoConstraints = false; cell.addSubview(view) }
+        cell.textField = label
+        NSLayoutConstraint.activate([
+            label.leadingAnchor.constraint(equalTo: cell.leadingAnchor, constant: 10),
+            label.centerYAnchor.constraint(equalTo: cell.centerYAnchor),
+            label.trailingAnchor.constraint(equalTo: pin.leadingAnchor, constant: -6),
+            pin.trailingAnchor.constraint(equalTo: cell.trailingAnchor, constant: -8),
+            pin.centerYAnchor.constraint(equalTo: cell.centerYAnchor),
+            pin.widthAnchor.constraint(equalToConstant: 24), pin.heightAnchor.constraint(equalToConstant: 28)
+        ])
+        return cell
+    }
+    @objc func togglePin(_ sender: NotePinButton) {
+        guard let id = sender.noteID else { return }
+        NoteOrdering.togglePin(id, in: &notes)
+        dirty = true
+        // Preserve the editor and its undo history when the list changes order.
+        loading = true
+        table.reloadData()
+        if let row = displayedNotes.firstIndex(where: { $0.id == selectedID }) {
+            table.selectRowIndexes(IndexSet(integer: row), byExtendingSelection: false)
+        }
+        loading = false
+        _ = save()
     }
     func tableViewSelectionDidChange(_ notification: Notification) {
+        guard !loading else { return }
         let row = table.selectedRow
-        guard notes.indices.contains(row) else { return }
-        selectedID = notes[row].id
+        guard displayedNotes.indices.contains(row) else { return }
+        let note = displayedNotes[row]
+        guard selectedID != note.id else { return }
+        selectedID = note.id
         loading = true
-        textView.string = notes[row].text
+        textView.textStorage?.setAttributedString(note.attributedText)
+        textView.typingAttributes = [.font: NSFont.systemFont(ofSize: 16), .foregroundColor: NSColor.textColor]
         textView.undoManager?.removeAllActions()
         loading = false
     }
-    func select(_ row: Int) {
+    func select(_ index: Int) {
+        guard notes.indices.contains(index) else { return }
+        let id = notes[index].id
+        loading = true
         table.reloadData()
-        table.selectRowIndexes(IndexSet(integer: row), byExtendingSelection: false)
+        if let row = displayedNotes.firstIndex(where: { $0.id == id }) {
+            table.selectRowIndexes(IndexSet(integer: row), byExtendingSelection: false)
+        }
+        loading = false
         tableViewSelectionDidChange(Notification(name: NSTableView.selectionDidChangeNotification))
     }
     func textDidChange(_ notification: Notification) {
         guard !loading, let i = index else { return }
-        notes[i].text = textView.string
-        notes[i].modified = Date()
         dirty = true
-        table.reloadData(forRowIndexes: IndexSet(integer: i), columnIndexes: IndexSet(integer: 0))
+        do { try notes[i].update(content: textView.attributedString()) }
+        catch { status.stringValue = "Не удалось сохранить форматирование"; return }
+        if let row = displayedNotes.firstIndex(where: { $0.id == selectedID }) {
+            table.reloadData(forRowIndexes: IndexSet(integer: row), columnIndexes: IndexSet(integer: 0))
+        }
         _ = save()
     }
     @objc func openEditor() {
@@ -461,7 +505,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTa
             guard response == .OK, let url = panel.url else { return }
             do {
                 if asPDF {
-                    try PDFExporter.data(text: note.text, title: note.title).write(to: url, options: .atomic)
+                    try PDFExporter.data(text: note.text, title: note.title, richText: note.attributedText).write(to: url, options: .atomic)
                 } else {
                     try note.text.write(to: url, atomically: true, encoding: .utf8)
                 }
