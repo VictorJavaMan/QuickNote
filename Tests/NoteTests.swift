@@ -2,7 +2,20 @@ import AppKit
 import PDFKit
 
 @main struct NoteTests {
+    static func tryImport(_ data: Data) -> String { try! TextFileImporter.decode(data) }
     static func main() throws {
+        let sample = "Привет, JSON!\n{\"ok\": true}"
+        assert(tryImport(Data(sample.utf8)) == sample)
+        assert(tryImport(Data([0xEF, 0xBB, 0xBF]) + Data(sample.utf8)) == sample)
+        assert(tryImport(Data([0xFF, 0xFE]) + sample.data(using: .utf16LittleEndian)!) == sample)
+        assert(tryImport(Data([0, 0, 0xFE, 0xFF]) + sample.data(using: .utf32BigEndian)!) == sample)
+        assert(tryImport(Data()) == "")
+        let cyrillic = "Привет"
+        let cp = try TextFileImporter.decode(cyrillic.data(using: .windowsCP1251)!, encoding: .windows1251)
+        assert(cp == cyrillic)
+        do { _ = try TextFileImporter.decode(Data([0, 1, 2, 3])); assertionFailure("Binary accepted") } catch {}
+        do { _ = try TextFileImporter.decode(Data([0xFF, 0xA0])); assertionFailure("Invalid UTF-8 accepted") } catch {}
+        print("PASS: text import UTF-8, BOM, UTF-16/32, CP1251, empty and binary rejection")
         let legacy = "[{\"id\":\"601B0C93-76F4-48B7-8820-16141C74C018\",\"text\":\"Старая заметка\",\"modified\":0}]"
         let old = try JSONDecoder().decode([Note].self, from: Data(legacy.utf8))
         assert(old[0].text == "Старая заметка" && old[0].richText == nil)

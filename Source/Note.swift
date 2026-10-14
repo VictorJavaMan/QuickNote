@@ -5,9 +5,10 @@ struct Note: Codable {
     var text = ""
     var modified = Date()
     // Optional fields keep existing notes.json files compatible.
+    var importedName: String?
     var richText: Data?
     var isPinned: Bool?
-    var title: String { text.split(separator: "\n").first.map(String.init) ?? "Новая заметка" }
+    var title: String { importedName ?? text.split(separator: "\n").first.map(String.init) ?? "Новая заметка" }
     var attributedText: NSAttributedString {
         if let richText, let content = NSAttributedString(rtf: richText, documentAttributes: nil) { return content }
         return NSAttributedString(string: text, attributes: [.font: NSFont.systemFont(ofSize: 16), .foregroundColor: NSColor.textColor])

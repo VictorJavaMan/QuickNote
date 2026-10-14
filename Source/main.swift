@@ -59,6 +59,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTa
     var themePicker: NSPopUpButton?
     var noteSplit: NSSplitView?
     var restoringLayout = false
+    var pendingFiles: [URL] = []
     let table = NSTableView()
     let textView = NSTextView()
     let status = NSTextField(labelWithString: "")
@@ -80,6 +81,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTa
         select(0)
         applyTheme()
         bubble.orderFrontRegardless()
+        if !pendingFiles.isEmpty { let urls = pendingFiles; pendingFiles = []; importFiles(urls) }
         NotificationCenter.default.addObserver(self, selector: #selector(screenChanged), name: NSApplication.didChangeScreenParametersNotification, object: nil)
         if storageUnavailable { showError("Не удалось прочитать сохранённые заметки. Исходный файл сохранён без изменений. Проверьте файл в папке данных через меню приложения.") }
     }
@@ -109,7 +111,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTa
         }
         statusItem.button?.toolTip = "QuickNote — быстрые заметки"
         let menu = NSMenu()
-        for (title, action, key) in [("Открыть блокнот", #selector(openEditor), ""), ("Новая заметка", #selector(newNote), "n"), ("Сохранить", #selector(saveAction), "s"), ("Экспортировать заметку…", #selector(exportNote), "e"), ("Свернуть в кнопку", #selector(collapse), "w"), ("Вернуть кнопку на экран", #selector(resetBubble), ""), ("Открыть папку данных", #selector(openData), ""), ("Настройки…", #selector(openSettings), ",")] {
+        for (title, action, key) in [("Открыть блокнот", #selector(openEditor), ""), ("Новая заметка", #selector(newNote), "n"), ("Открыть файл…", #selector(openFiles), "o"), ("Сохранить", #selector(saveAction), "s"), ("Экспортировать заметку…", #selector(exportNote), "e"), ("Свернуть в кнопку", #selector(collapse), "w"), ("Вернуть кнопку на экран", #selector(resetBubble), ""), ("Открыть папку данных", #selector(openData), ""), ("Настройки…", #selector(openSettings), ",")] {
             let item = menu.addItem(withTitle: title, action: action, keyEquivalent: key)
             item.target = self
         }
@@ -277,13 +279,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTa
         if #available(macOS 13.0, *) { editor.collectionBehavior.insert(.canJoinAllApplications) }
         editor.hidesOnDeactivate = false
         editor.isReleasedWhenClosed = false
-        editor.minSize = NSSize(width: 680, height: 350)
+        editor.minSize = NSSize(width: 760, height: 350)
         editor.center()
         editor.setFrameUsingName("QuickNoteEditor")
         editor.setFrameAutosaveName("QuickNoteEditor")
         let root = NSView()
         editor.contentView = root
-        let toolbar = NSStackView(views: [button("＋ Заметка", #selector(newNote)), button("Сохранить", #selector(saveAction)), button("Экспорт…", #selector(exportNote)), button("Удалить", #selector(deleteNote)), button("Свернуть ↗", #selector(collapse)), button("⚙", #selector(openSettings))])
+        let toolbar = NSStackView(views: [button("＋ Заметка", #selector(newNote)), button("Открыть…", #selector(openFiles)), button("Сохранить", #selector(saveAction)), button("Экспорт…", #selector(exportNote)), button("Удалить", #selector(deleteNote)), button("Свернуть ↗", #selector(collapse)), button("⚙", #selector(openSettings))])
         toolbar.spacing = 8
         toolbar.orientation = .horizontal
         let split = NSSplitView()
@@ -459,6 +461,46 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTa
     func windowShouldClose(_ sender: NSWindow) -> Bool {
         if sender === editor { collapse(); return false }
         return true
+    }
+    @objc func openFiles() {
+        openEditor()
+        let panel = NSOpenPanel()
+        panel.title = "Открыть текстовые файлы"
+        panel.message = "Файлы будут импортированы в заметки. Исходные файлы не изменяются."
+        panel.canChooseDirectories = false
+        panel.allowsMultipleSelection = true
+        // No extension filter: logs, JSON, source code and extensionless text are supported.
+        let picker = NSPopUpButton(frame: NSRect(x: 0, y: 0, width: 250, height: 28))
+        picker.addItems(withTitles: ["Кодировка: автоматически", "UTF-8", "UTF-16", "Windows-1251", "Latin-1"])
+        panel.accessoryView = picker
+        panel.beginSheetModal(for: editor) { [weak self] response in
+            guard response == .OK else { return }
+            self?.importFiles(panel.urls, encoding: TextFileImporter.Encoding(rawValue: picker.indexOfSelectedItem) ?? .automatic)
+        }
+    }
+    func application(_ sender: NSApplication, openFiles filenames: [String]) {
+        let urls = filenames.map { URL(fileURLWithPath: $0) }
+        if editor == nil { pendingFiles.append(contentsOf: urls) } else { importFiles(urls) }
+        sender.reply(toOpenOrPrint: .success)
+    }
+    func importFiles(_ urls: [URL], encoding: TextFileImporter.Encoding = .automatic) {
+        var imported: [Note] = []
+        var errors: [String] = []
+        for url in urls {
+            do {
+                var note = Note(text: try TextFileImporter.read(url, encoding: encoding))
+                note.importedName = url.lastPathComponent
+                imported.append(note)
+            } catch { errors.append("\(url.lastPathComponent): \(error.localizedDescription)") }
+        }
+        if !imported.isEmpty {
+            notes.insert(contentsOf: imported, at: 0)
+            dirty = true
+            select(0)
+            _ = save()
+            openEditor()
+        }
+        if !errors.isEmpty { showError(errors.joined(separator: "\n\n")) }
     }
     @objc func newNote() { notes.insert(Note(), at: 0); dirty = true; select(0); _ = save(); openEditor() }
     @objc func saveAction() { if !save() { showError("Сохранение не удалось. Экспортируйте заметку в текстовый файл, чтобы не потерять изменения.") } }
